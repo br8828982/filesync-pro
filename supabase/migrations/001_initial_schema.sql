@@ -1,9 +1,10 @@
--- Enable UUID extension
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+-- 1. EXTENSIONS
+-- We explicitly set the schema to extensions to match your previous setup
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA extensions;
 
--- Products table
-CREATE TABLE products (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+-- 2. TABLES
+CREATE TABLE public.products (
+  id UUID PRIMARY KEY DEFAULT extensions.uuid_generate_v4(),
   name TEXT NOT NULL,
   description TEXT,
   price NUMERIC NOT NULL CHECK (price >= 0),
@@ -17,8 +18,7 @@ CREATE TABLE products (
   CONSTRAINT stock_consistency CHECK (stock_quantity >= stock_reserved)
 );
 
--- Profiles table
-CREATE TABLE profiles (
+CREATE TABLE public.profiles (
   id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
   display_name TEXT,
   phone TEXT,
@@ -27,9 +27,8 @@ CREATE TABLE profiles (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Addresses table
-CREATE TABLE addresses (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+CREATE TABLE public.addresses (
+  id UUID PRIMARY KEY DEFAULT extensions.uuid_generate_v4(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   label TEXT,
   full_name TEXT NOT NULL,
@@ -45,9 +44,8 @@ CREATE TABLE addresses (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Orders table
-CREATE TABLE orders (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+CREATE TABLE public.orders (
+  id UUID PRIMARY KEY DEFAULT extensions.uuid_generate_v4(),
   user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
   stripe_session_id TEXT UNIQUE NOT NULL,
   status TEXT DEFAULT 'pending',
@@ -73,9 +71,8 @@ CREATE TABLE orders (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Order items table
-CREATE TABLE order_items (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+CREATE TABLE public.order_items (
+  id UUID PRIMARY KEY DEFAULT extensions.uuid_generate_v4(),
   order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
   product_id UUID REFERENCES products(id) ON DELETE SET NULL,
   product_name TEXT NOT NULL,
@@ -85,9 +82,8 @@ CREATE TABLE order_items (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Coupons table
-CREATE TABLE coupons (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+CREATE TABLE public.coupons (
+  id UUID PRIMARY KEY DEFAULT extensions.uuid_generate_v4(),
   code TEXT UNIQUE NOT NULL,
   discount_type TEXT NOT NULL CHECK (discount_type IN ('percentage', 'fixed')),
   discount_value NUMERIC NOT NULL CHECK (discount_value > 0),
@@ -100,9 +96,8 @@ CREATE TABLE coupons (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Inventory log table (audit trail)
-CREATE TABLE inventory_log (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+CREATE TABLE public.inventory_log (
+  id UUID PRIMARY KEY DEFAULT extensions.uuid_generate_v4(),
   product_id UUID REFERENCES products(id) ON DELETE SET NULL,
   product_name TEXT NOT NULL,
   change_type TEXT NOT NULL,
@@ -115,9 +110,8 @@ CREATE TABLE inventory_log (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Stock reservations table
-CREATE TABLE stock_reservations (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+CREATE TABLE public.stock_reservations (
+  id UUID PRIMARY KEY DEFAULT extensions.uuid_generate_v4(),
   product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
   quantity INTEGER NOT NULL CHECK (quantity > 0),
   stripe_session_id TEXT UNIQUE NOT NULL,
@@ -127,9 +121,8 @@ CREATE TABLE stock_reservations (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Failed payments table
-CREATE TABLE failed_payments (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+CREATE TABLE public.failed_payments (
+  id UUID PRIMARY KEY DEFAULT extensions.uuid_generate_v4(),
   stripe_session_id TEXT NOT NULL,
   customer_email TEXT NOT NULL,
   amount NUMERIC NOT NULL,
@@ -139,9 +132,8 @@ CREATE TABLE failed_payments (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Checkout sessions table
-CREATE TABLE checkout_sessions (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+CREATE TABLE public.checkout_sessions (
+  id UUID PRIMARY KEY DEFAULT extensions.uuid_generate_v4(),
   stripe_session_id TEXT UNIQUE NOT NULL,
   user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
   items JSONB NOT NULL,
@@ -156,22 +148,20 @@ CREATE TABLE checkout_sessions (
   completed BOOLEAN DEFAULT false
 );
 
--- Indexes for performance
-CREATE INDEX idx_products_category ON products(category);
-CREATE INDEX idx_products_published ON products(is_published);
-CREATE INDEX idx_addresses_user ON addresses(user_id);
-CREATE INDEX idx_orders_user ON orders(user_id);
-CREATE INDEX idx_orders_stripe ON orders(stripe_session_id);
-CREATE INDEX idx_orders_status ON orders(status);
-CREATE INDEX idx_order_items_order ON order_items(order_id);
-CREATE INDEX idx_inventory_log_product ON inventory_log(product_id);
-CREATE INDEX idx_stock_reservations_product ON stock_reservations(product_id);
-CREATE INDEX idx_stock_reservations_session ON stock_reservations(stripe_session_id);
-CREATE INDEX idx_stock_reservations_expires ON stock_reservations(expires_at);
-CREATE INDEX idx_checkout_sessions_stripe ON checkout_sessions(stripe_session_id);
+-- 3. FUNCTIONS (THE FIX)
+-- This function is the "Secret Sauce" to prevent infinite RLS loops
+CREATE OR REPLACE FUNCTION public.is_admin()
+RETURNS BOOLEAN AS $$
+BEGIN
+  RETURN (
+    SELECT (role = 'admin')
+    FROM public.profiles
+    WHERE id = auth.uid()
+  );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
 
--- Updated_at trigger function
-CREATE OR REPLACE FUNCTION update_updated_at_column()
+CREATE OR REPLACE FUNCTION public.update_updated_at_column()
 RETURNS TRIGGER AS $$
 BEGIN
   NEW.updated_at = NOW();
@@ -179,122 +169,6 @@ BEGIN
 END;
 $$ language 'plpgsql';
 
--- Apply updated_at trigger to relevant tables
-CREATE TRIGGER update_products_updated_at BEFORE UPDATE ON products
-  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
-CREATE TRIGGER update_profiles_updated_at BEFORE UPDATE ON profiles
-  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
-CREATE TRIGGER update_addresses_updated_at BEFORE UPDATE ON addresses
-  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
-CREATE TRIGGER update_orders_updated_at BEFORE UPDATE ON orders
-  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
-CREATE TRIGGER update_coupons_updated_at BEFORE UPDATE ON coupons
-  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
-
--- Row Level Security (RLS) policies
-
--- Products: Public read, admin write
-ALTER TABLE products ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "Anyone can view published products" ON products
-  FOR SELECT USING (is_published = true);
-CREATE POLICY "Admins can do anything with products" ON products
-  FOR ALL USING (
-    EXISTS (
-      SELECT 1 FROM profiles
-      WHERE profiles.id = auth.uid() AND profiles.role = 'admin'
-    )
-  );
-
--- Profiles: Users can read their own, admins can read all
-ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "Users can view own profile" ON profiles
-  FOR SELECT USING (auth.uid() = id);
-CREATE POLICY "Users can update own profile" ON profiles
-  FOR UPDATE USING (auth.uid() = id);
-CREATE POLICY "Admins can view all profiles" ON profiles
-  FOR SELECT USING (
-    EXISTS (
-      SELECT 1 FROM profiles
-      WHERE profiles.id = auth.uid() AND profiles.role = 'admin'
-    )
-  );
-
--- Addresses: Users can manage their own
-ALTER TABLE addresses ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "Users can view own addresses" ON addresses
-  FOR SELECT USING (auth.uid() = user_id);
-CREATE POLICY "Users can insert own addresses" ON addresses
-  FOR INSERT WITH CHECK (auth.uid() = user_id);
-CREATE POLICY "Users can update own addresses" ON addresses
-  FOR UPDATE USING (auth.uid() = user_id);
-CREATE POLICY "Users can delete own addresses" ON addresses
-  FOR DELETE USING (auth.uid() = user_id);
-
--- Orders: Users can view their own, admins can view all
-ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "Users can view own orders" ON orders
-  FOR SELECT USING (auth.uid() = user_id);
-CREATE POLICY "Admins can view all orders" ON orders
-  FOR SELECT USING (
-    EXISTS (
-      SELECT 1 FROM profiles
-      WHERE profiles.id = auth.uid() AND profiles.role = 'admin'
-    )
-  );
-CREATE POLICY "Admins can update orders" ON orders
-  FOR UPDATE USING (
-    EXISTS (
-      SELECT 1 FROM profiles
-      WHERE profiles.id = auth.uid() AND profiles.role = 'admin'
-    )
-  );
-
--- Order items: Can be read if user can read the order
-ALTER TABLE order_items ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "Users can view own order items" ON order_items
-  FOR SELECT USING (
-    EXISTS (
-      SELECT 1 FROM orders
-      WHERE orders.id = order_items.order_id
-        AND orders.user_id = auth.uid()
-    )
-  );
-CREATE POLICY "Admins can view all order items" ON order_items
-  FOR SELECT USING (
-    EXISTS (
-      SELECT 1 FROM profiles
-      WHERE profiles.id = auth.uid() AND profiles.role = 'admin'
-    )
-  );
-
--- Coupons: Public read of active coupons, admin write
-ALTER TABLE coupons ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "Anyone can view active coupons" ON coupons
-  FOR SELECT USING (is_active = true);
-CREATE POLICY "Admins can manage coupons" ON coupons
-  FOR ALL USING (
-    EXISTS (
-      SELECT 1 FROM profiles
-      WHERE profiles.id = auth.uid() AND profiles.role = 'admin'
-    )
-  );
-
--- Inventory log: Admins only
-ALTER TABLE inventory_log ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "Admins can view inventory log" ON inventory_log
-  FOR SELECT USING (
-    EXISTS (
-      SELECT 1 FROM profiles
-      WHERE profiles.id = auth.uid() AND profiles.role = 'admin'
-    )
-  );
-
--- Stock reservations, failed_payments, checkout_sessions: Service role only
-ALTER TABLE stock_reservations ENABLE ROW LEVEL SECURITY;
-ALTER TABLE failed_payments ENABLE ROW LEVEL SECURITY;
-ALTER TABLE checkout_sessions ENABLE ROW LEVEL SECURITY;
-
--- Function to create profile on user signup
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -304,7 +178,52 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
--- Trigger for new user signup
-CREATE TRIGGER on_auth_user_created
-  AFTER INSERT ON auth.users
-  FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+-- 4. TRIGGERS
+CREATE TRIGGER update_products_updated_at BEFORE UPDATE ON products FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+CREATE TRIGGER update_profiles_updated_at BEFORE UPDATE ON profiles FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+CREATE TRIGGER update_addresses_updated_at BEFORE UPDATE ON addresses FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+CREATE TRIGGER update_orders_updated_at BEFORE UPDATE ON orders FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+CREATE TRIGGER update_coupons_updated_at BEFORE UPDATE ON coupons FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+CREATE TRIGGER on_auth_user_created AFTER INSERT ON auth.users FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+
+-- 5. RLS POLICIES
+-- Products
+ALTER TABLE products ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Anyone can view published products" ON products FOR SELECT USING (is_published = true);
+CREATE POLICY "Admins can manage products" ON products FOR ALL USING ( public.is_admin() );
+
+-- Profiles
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Users can view own profile" ON profiles FOR SELECT USING (auth.uid() = id);
+CREATE POLICY "Users can update own profile" ON profiles FOR UPDATE USING (auth.uid() = id);
+CREATE POLICY "Admins can view all profiles" ON profiles FOR SELECT USING ( public.is_admin() );
+
+-- Addresses
+ALTER TABLE addresses ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Users manage own addresses" ON addresses FOR ALL USING (auth.uid() = user_id);
+
+-- Orders
+ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Users view own orders" ON orders FOR SELECT USING (auth.uid() = user_id);
+CREATE POLICY "Admins manage orders" ON orders FOR ALL USING ( public.is_admin() );
+
+-- Order Items
+ALTER TABLE order_items ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Users view own items" ON order_items FOR SELECT USING (EXISTS (SELECT 1 FROM orders WHERE orders.id = order_items.order_id AND orders.user_id = auth.uid()));
+CREATE POLICY "Admins view all items" ON order_items FOR SELECT USING ( public.is_admin() );
+
+-- Coupons
+ALTER TABLE coupons ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Anyone view active coupons" ON coupons FOR SELECT USING (is_active = true);
+CREATE POLICY "Admins manage coupons" ON coupons FOR ALL USING ( public.is_admin() );
+
+-- Inventory Log
+ALTER TABLE inventory_log ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Admins view logs" ON inventory_log FOR SELECT USING ( public.is_admin() );
+
+-- 6. INDEXES
+CREATE INDEX idx_products_category ON products(category);
+CREATE INDEX idx_products_published ON products(is_published);
+CREATE INDEX idx_addresses_user ON addresses(user_id);
+CREATE INDEX idx_orders_user ON orders(user_id);
+CREATE INDEX idx_orders_stripe ON orders(stripe_session_id);

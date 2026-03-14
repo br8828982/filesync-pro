@@ -78,7 +78,7 @@ scoop install stripe
 Run webhook forwarding:
 ```bash
 stripe login
-stripe listen --forward-to localhost:3000/api/webhooks/stripe
+stripe listen --forward-to https://studious-doodle-7v9ppg4w4gpgfp9jx-3000.app.github.dev/api/webhooks/stripe
 ```
 
 Copy the webhook signing secret (starts with `whsec_`) to your `.env.local` as `STRIPE_WEBHOOK_SECRET`
